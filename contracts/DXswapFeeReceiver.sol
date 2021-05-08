@@ -2,7 +2,7 @@ pragma solidity =0.5.16;
 
 import './interfaces/IDXswapFactory.sol';
 import './interfaces/IDXswapPair.sol';
-import './interfaces/IERC20.sol';
+import './interfaces/IWETH.sol';
 import './libraries/TransferHelper.sol';
 import './libraries/SafeMath.sol';
 
@@ -10,60 +10,45 @@ import './libraries/SafeMath.sol';
 contract DXswapFeeReceiver {
     using SafeMath for uint;
 
-    uint256 public constant ONE_HUNDRED_PERCENT = 10**10;
-    address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
-
     address public owner;
     IDXswapFactory public factory;
-    IERC20 public honeyToken;
-    address public hsfToken;
-    address public honeyReceiver;
-    address public hsfReceiver;
-    uint256 public splitHoneyProportion;
+    address public WETH;
+    address public ethReceiver;
+    address public fallbackReceiver;
 
     constructor(
-        address _owner, address _factory, IERC20 _honeyToken, address _hsfToken, address _honeyReceiver,
-        address _hsfReceiver, uint256 _splitHoneyProportion
+        address _owner, address _factory, address _WETH, address _ethReceiver, address _fallbackReceiver
     ) public {
-        require(_splitHoneyProportion <= ONE_HUNDRED_PERCENT / 2, 'DXswapFeeReceiver: HONEY_PROPORTION_TOO_HIGH');
         owner = _owner;
         factory = IDXswapFactory(_factory);
-        honeyToken = _honeyToken;
-        hsfToken = _hsfToken;
-        honeyReceiver = _honeyReceiver;
-        hsfReceiver = _hsfReceiver;
-        splitHoneyProportion = _splitHoneyProportion;
+        WETH = _WETH;
+        ethReceiver = _ethReceiver;
+        fallbackReceiver = _fallbackReceiver;
     }
-
+    
     function() external payable {}
 
     function transferOwnership(address newOwner) external {
         require(msg.sender == owner, 'DXswapFeeReceiver: FORBIDDEN');
         owner = newOwner;
     }
-
-    function changeReceivers(address _honeyReceiver, address _hsfReceiver) external {
+    
+    function changeReceivers(address _ethReceiver, address _fallbackReceiver) external {
         require(msg.sender == owner, 'DXswapFeeReceiver: FORBIDDEN');
-        honeyReceiver = _honeyReceiver;
-        hsfReceiver = _hsfReceiver;
+        ethReceiver = _ethReceiver;
+        fallbackReceiver = _fallbackReceiver;
     }
-
-    function changeSplitHoneyProportion(uint256 _splitHoneyProportion) external {
-        require(msg.sender == owner, 'DXswapFeeReceiver: FORBIDDEN');
-        require(_splitHoneyProportion <= ONE_HUNDRED_PERCENT / 2, 'DXswapFeeReceiver: HONEY_PROPORTION_TOO_HIGH');
-        splitHoneyProportion = _splitHoneyProportion;
-    }
-
+    
     // Returns sorted token addresses, used to handle return values from pairs sorted in this order
-    function _sortTokens(address tokenA, address tokenB) internal pure returns (address token0, address token1) {
+    function sortTokens(address tokenA, address tokenB) internal pure returns (address token0, address token1) {
         require(tokenA != tokenB, 'DXswapFeeReceiver: IDENTICAL_ADDRESSES');
         (token0, token1) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
         require(token0 != address(0), 'DXswapFeeReceiver: ZERO_ADDRESS');
     }
-
+    
     // Helper function to know if an address is a contract, extcodesize returns the size of the code of a smart
     //  contract in a specific address
-    function _isContract(address addr) internal returns (bool) {
+    function isContract(address addr) internal returns (bool) {
         uint size;
         assembly { size := extcodesize(addr) }
         return size > 0;
@@ -71,48 +56,60 @@ contract DXswapFeeReceiver {
 
     // Calculates the CREATE2 address for a pair without making any external calls
     // Taken from DXswapLibrary, removed the factory parameter
-    function _pairFor(address tokenA, address tokenB) internal view returns (address pair) {
-        (address token0, address token1) = _sortTokens(tokenA, tokenB);
+    function pairFor(address tokenA, address tokenB) internal view returns (address pair) {
+        (address token0, address token1) = sortTokens(tokenA, tokenB);
         pair = address(uint(keccak256(abi.encodePacked(
-                hex'ff',
-                factory,
-                keccak256(abi.encodePacked(token0, token1)),
-                hex'f23fac090dc304615f73576672d67b74204fd7c289024743f16fc2ff983711ca' // init code hash 1hive's
-//                hex'd306a548755b9295ee49cc729e13ca4a45e00199bbd890fa146da43a50571776' // init code hash original
-            ))));
+            hex'ff',
+            factory,
+            keccak256(abi.encodePacked(token0, token1)),
+            hex'd306a548755b9295ee49cc729e13ca4a45e00199bbd890fa146da43a50571776' // init code hash
+        ))));
     }
-
-    // Done with code from DXswapRouter and DXswapLibrary, removed the deadline argument
-    function _swapTokens(uint amountIn, address fromToken, address toToken)
-        internal returns (uint256 amountOut)
+    
+    // Done with code form DXswapRouter and DXswapLibrary, removed the deadline argument
+    function _swapTokensForETH(uint amountIn, address fromToken)
+        internal
     {
-        IDXswapPair pairToUse = IDXswapPair(_pairFor(fromToken, toToken));
-
+        IDXswapPair pairToUse = IDXswapPair(pairFor(fromToken, WETH));
+        
         (uint reserve0, uint reserve1,) = pairToUse.getReserves();
-        (uint reserveIn, uint reserveOut) = fromToken < toToken ? (reserve0, reserve1) : (reserve1, reserve0);
+        (uint reserveIn, uint reserveOut) = fromToken < WETH ? (reserve0, reserve1) : (reserve1, reserve0);
 
         require(reserveIn > 0 && reserveOut > 0, 'DXswapFeeReceiver: INSUFFICIENT_LIQUIDITY');
         uint amountInWithFee = amountIn.mul(uint(10000).sub(pairToUse.swapFee()));
         uint numerator = amountInWithFee.mul(reserveOut);
         uint denominator = reserveIn.mul(10000).add(amountInWithFee);
-        amountOut = numerator / denominator;
-
+        uint amountOut = numerator / denominator;
+        
         TransferHelper.safeTransfer(
             fromToken, address(pairToUse), amountIn
         );
-
-        (uint amount0Out, uint amount1Out) = fromToken < toToken ? (uint(0), amountOut) : (amountOut, uint(0));
-
+        
+        (uint amount0Out, uint amount1Out) = fromToken < WETH ? (uint(0), amountOut) : (amountOut, uint(0));
+        
         pairToUse.swap(
             amount0Out, amount1Out, address(this), new bytes(0)
         );
+        
+        IWETH(WETH).withdraw(amountOut);
+        TransferHelper.safeTransferETH(ethReceiver, amountOut);
     }
 
-    function _swapForHoney(address token, uint amount) internal {
-        require(_isContract(_pairFor(token, address(honeyToken))), 'DXswapFeeReceiver: NO_HONEY_PAIR');
-        _swapTokens(amount, token, address(honeyToken));
+    // Transfer to the owner address the token converted into ETH if possible, if not just transfer the token.
+    function _takeETHorToken(address token, uint amount) internal {
+      if (token == WETH) {
+        // If it is WETH, transfer directly to ETH receiver
+        IWETH(WETH).withdraw(amount);
+        TransferHelper.safeTransferETH(ethReceiver, amount);
+      } else if (isContract(pairFor(token, WETH))) {
+        // If it is not WETH and there is a direct path to WETH, swap and transfer WETH to ETH receiver
+        _swapTokensForETH(amount, token);
+      } else {
+        // If it is not WETH and there is not a direct path to WETH, transfer tokens directly to fallback receiver
+        TransferHelper.safeTransfer(token, fallbackReceiver, amount);
+      }
     }
-
+    
     // Take what was charged as protocol fee from the DXswap pair liquidity
     function takeProtocolFee(IDXswapPair[] calldata pairs) external {
         for (uint i = 0; i < pairs.length; i++) {
@@ -120,21 +117,11 @@ contract DXswapFeeReceiver {
             address token1 = pairs[i].token1();
             pairs[i].transfer(address(pairs[i]), pairs[i].balanceOf(address(this)));
             (uint amount0, uint amount1) = pairs[i].burn(address(this));
-
-            if (amount0 > 0 && token0 != address(honeyToken))
-                _swapForHoney(token0, amount0);
-            if (amount1 > 0 && token1 != address(honeyToken))
-                _swapForHoney(token1, amount1);
-
-            uint256 honeyBalance = honeyToken.balanceOf(address(this));
-            uint256 honeyEarned = (honeyBalance.mul(splitHoneyProportion)) / ONE_HUNDRED_PERCENT;
-            TransferHelper.safeTransfer(address(honeyToken), honeyReceiver, honeyEarned);
-
-            uint256 honeyToConvertToHsf = honeyBalance.sub(honeyEarned);
-            uint256 hsfEarned = _swapTokens(honeyToConvertToHsf, address(honeyToken), hsfToken);
-            uint256 halfHsfEarned = hsfEarned / 2;
-            TransferHelper.safeTransfer(hsfToken, hsfReceiver, halfHsfEarned);
-            TransferHelper.safeTransfer(hsfToken, BURN_ADDRESS, halfHsfEarned);
+            if (amount0 > 0)
+                _takeETHorToken(token0, amount0);
+            if (amount1 > 0)
+                _takeETHorToken(token1, amount1);
         }
     }
+
 }
