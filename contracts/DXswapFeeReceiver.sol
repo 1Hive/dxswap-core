@@ -119,6 +119,8 @@ contract DXswapFeeReceiver {
         for (uint i = 0; i < pairs.length; i++) {
             address token0 = pairs[i].token0();
             address token1 = pairs[i].token1();
+            // if one of the Tokens is an honeyswap LP token this function reverts. 
+            require(IDXswapPair(token0).factory() != address(factory) && IDXswapPair(token1).factory() != address(factory), "Honeyswap LP token in pair");
             pairs[i].transfer(address(pairs[i]), pairs[i].balanceOf(address(this)));
             (uint amount0, uint amount1) = pairs[i].burn(address(this));
 
