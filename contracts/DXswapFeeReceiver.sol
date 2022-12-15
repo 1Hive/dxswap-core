@@ -114,29 +114,77 @@ contract DXswapFeeReceiver {
         _swapTokens(amount, token, address(honeyToken));
     }
 
+    function bytes2addr(bytes memory data) internal returns (address addr) {
+        assembly {
+            mstore(0, mload(add(add(data, 32), 0)))
+            addr := mload(0)
+        }
+    }
+
     // Take what was charged as protocol fee from the DXswap pair liquidity
     function takeProtocolFee(IDXswapPair[] calldata pairs) external {
-        for (uint i = 0; i < pairs.length; i++) {
-            address token0 = pairs[i].token0();
-            address token1 = pairs[i].token1();
-            pairs[i].transfer(address(pairs[i]), pairs[i].balanceOf(address(this)));
-            (uint amount0, uint amount1) = pairs[i].burn(address(this));
+        for (uint256 i = 0; i < pairs.length; i++) {
+            uint256 pairBalance = pairs[i].balanceOf(address(this));
+            // skip if there's no balance rather than revert later
+            if ( pairBalance > 0) {
+                address token0 = pairs[i].token0();
+                address token1 = pairs[i].token1();
+                bytes memory data0;
+                bytes memory data1;
+                (, data0) = token0.staticcall.gas(5000)(
+                    abi.encodeWithSignature("factory()")
+                );
+                (, data1) = token1.staticcall.gas(5000)(
+                    abi.encodeWithSignature("factory()")
+                );
+                // if one of the Tokens is an honeyswap LP token this function reverts.
+                require(
+                    bytes2addr(data0) != address(factory) &&
+                        bytes2addr(data1) != address(factory),
+                    "Honeyswap LP token in pair"
+                );
 
-            if (amount0 > 0 && token0 != address(honeyToken))
-                _swapForHoney(token0, amount0);
-            if (amount1 > 0 && token1 != address(honeyToken))
-                _swapForHoney(token1, amount1);
+                pairs[i].transfer(
+                    address(pairs[i]),
+                    pairBalance
+                );
+                (uint256 amount0, uint256 amount1) = pairs[i].burn(
+                    address(this)
+                );
 
-            uint256 honeyBalance = honeyToken.balanceOf(address(this));
-            uint256 honeyEarned = (honeyBalance.mul(splitHoneyProportion)) / ONE_HUNDRED_PERCENT;
-            TransferHelper.safeTransfer(address(honeyToken), honeyReceiver, honeyEarned);
+                if (amount0 > 0 && token0 != address(honeyToken))
+                    _swapForHoney(token0, amount0);
+                if (amount1 > 0 && token1 != address(honeyToken))
+                    _swapForHoney(token1, amount1);
 
-            uint256 honeyToConvertToHsf = honeyBalance.sub(honeyEarned);
-            uint256 hsfEarned = _swapTokens(honeyToConvertToHsf, address(honeyToken), address(hsfToken));
-            uint256 halfHsfEarned = hsfEarned / 2;
-            TransferHelper.safeTransfer(address(hsfToken), BURN_ADDRESS, halfHsfEarned);
-            TransferHelper.safeTransfer(address(hsfToken), address(hsfReceiver), halfHsfEarned);
-            hsfReceiver.rebalance();
+                uint256 honeyBalance = honeyToken.balanceOf(address(this));
+                uint256 honeyEarned = (honeyBalance.mul(splitHoneyProportion)) /
+                    ONE_HUNDRED_PERCENT;
+                TransferHelper.safeTransfer(
+                    address(honeyToken),
+                    honeyReceiver,
+                    honeyEarned
+                );
+
+                uint256 honeyToConvertToHsf = honeyBalance.sub(honeyEarned);
+                uint256 hsfEarned = _swapTokens(
+                    honeyToConvertToHsf,
+                    address(honeyToken),
+                    address(hsfToken)
+                );
+                uint256 halfHsfEarned = hsfEarned / 2;
+                TransferHelper.safeTransfer(
+                    address(hsfToken),
+                    BURN_ADDRESS,
+                    halfHsfEarned
+                );
+                TransferHelper.safeTransfer(
+                    address(hsfToken),
+                    address(hsfReceiver),
+                    halfHsfEarned
+                );
+                hsfReceiver.rebalance();
+            }
         }
     }
 }
